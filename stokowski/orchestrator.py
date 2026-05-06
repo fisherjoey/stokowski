@@ -599,14 +599,25 @@ class Orchestrator:
                 run = self._issue_state_runs.get(issue.id, 1)
                 max_rework = gate_cfg.max_rework if gate_cfg else None
                 if max_rework is not None and run >= max_rework:
-                    # Exceeded max rework — post escalated comment, don't transition
+                    # Exceeded max rework ceiling — post escalated comment and move
+                    # the ticket to Human Review so it is visible to humans and so
+                    # poll-stuck-rework cannot resurrect it back to Todo.
                     comment = make_gate_comment(
                         state=gate_state, status="escalated", run=run,
                     )
                     await client.post_comment(issue.id, comment)
+                    escalate_state = self.cfg.linear_states.review
+                    moved = await client.update_issue_state(issue.id, escalate_state)
+                    if moved:
+                        # Remove from pending-gates / state cache so the ticket
+                        # isn't picked up again on the next poll cycle.
+                        self._pending_gates.pop(issue.id, None)
+                        self._issue_current_state.pop(issue.id, None)
                     logger.warning(
                         f"Max rework exceeded issue={issue.identifier} "
                         f"gate={gate_state} run={run} max={max_rework}"
+                        + (f" → escalated to '{escalate_state}'" if moved
+                           else f" (failed to move to '{escalate_state}')")
                     )
                     continue
 
