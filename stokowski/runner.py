@@ -26,15 +26,18 @@ def build_claude_args(
     workspace_path: Path,
     session_id: str | None = None,
 ) -> list[str]:
-    """Build the claude CLI argument list."""
-    args = [claude_cfg.command]
+    """Build the claude CLI argument list.
+
+    All flags come first, then `--`, then the prompt as the trailing positional.
+    Stokowski's auto-generated lifecycle prompts begin with `---` (a markdown
+    front-matter delimiter), and the Claude CLI's argparser interprets that as
+    an attempted option name when the prompt sits between flags. The `--`
+    sentinel ends option processing so the prompt is read as a positional.
+    """
+    args = [claude_cfg.command, "-p"]
 
     if session_id:
-        # Continuation turn
-        args.extend(["-p", prompt, "--resume", session_id])
-    else:
-        # First turn
-        args.extend(["-p", prompt])
+        args.extend(["--resume", session_id])
 
     args.extend(["--verbose", "--output-format", "stream-json"])
 
@@ -59,6 +62,9 @@ def build_claude_args(
         extra = claude_cfg.append_system_prompt or ""
         combined = f"{headless_context}\n{extra}".strip()
         args.extend(["--append-system-prompt", combined])
+
+    # Prompt last, after `--` sentinel.
+    args.extend(["--", prompt])
 
     return args
 
