@@ -48,6 +48,13 @@ query($projectSlug: String!, $states: [String!]!, $after: String) {
           }
         }
       }
+      attachments {
+        nodes {
+          url
+          sourceType
+          updatedAt
+        }
+      }
     }
   }
 }
@@ -82,7 +89,16 @@ query($projectSlug: String!, $states: [String!]!, $after: String) {
     nodes {
       id
       identifier
+      title
+      url
       state { name }
+      attachments {
+        nodes {
+          url
+          sourceType
+          updatedAt
+        }
+      }
     }
   }
 }
@@ -146,6 +162,25 @@ def _parse_datetime(val: str | None) -> datetime | None:
         return None
 
 
+def _pick_pr_url(attachment_nodes: list[dict]) -> str | None:
+    """Choose the most recently-updated GitHub PR attachment, if any.
+
+    Linear's GitHub integration attaches PRs as `sourceType: "github"` (or
+    `githubPullRequest` in older versions). We match on the URL pattern as
+    a robust fallback so this keeps working across schema drift.
+    """
+    candidates: list[tuple[str | None, str]] = []
+    for att in attachment_nodes or []:
+        url = att.get("url") or ""
+        if "github.com/" in url and "/pull/" in url:
+            candidates.append((att.get("updatedAt"), url))
+    if not candidates:
+        return None
+    # Most-recently-updated wins; None updatedAt sorts to the bottom
+    candidates.sort(key=lambda c: c[0] or "", reverse=True)
+    return candidates[0][1]
+
+
 def _normalize_issue(node: dict) -> Issue:
     labels = [
         label["name"].lower()
@@ -161,7 +196,7 @@ def _normalize_issue(node: dict) -> Issue:
             # current issue, not the blocker). Linear's IssueRelation.issue is
             # the source/blocker; .relatedIssue is the target/blocked.
             # Tracking: https://github.com/Sugar-Coffee/stokowski/issues/20
-        
+
             ri = rel.get("issue", {}) or {}
             blockers.append(
                 BlockerRef(
@@ -178,6 +213,10 @@ def _normalize_issue(node: dict) -> Issue:
         except (ValueError, TypeError):
             priority = None
 
+    pr_url = _pick_pr_url(
+        (node.get("attachments", {}) or {}).get("nodes", [])
+    )
+
     return Issue(
         id=node["id"],
         identifier=node["identifier"],
@@ -187,6 +226,7 @@ def _normalize_issue(node: dict) -> Issue:
         state=(node.get("state") or {}).get("name", ""),
         branch_name=node.get("branchName"),
         url=node.get("url"),
+        pr_url=pr_url,
         labels=labels,
         blocked_by=blockers,
         created_at=_parse_datetime(node.get("createdAt")),
@@ -291,8 +331,12 @@ class LinearClient:
                         Issue(
                             id=node["id"],
                             identifier=node.get("identifier", ""),
-                            title="",
+                            title=node.get("title", ""),
                             state=(node.get("state") or {}).get("name", ""),
+                            url=node.get("url"),
+                            pr_url=_pick_pr_url(
+                                (node.get("attachments", {}) or {}).get("nodes", [])
+                            ),
                         )
                     )
 

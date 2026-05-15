@@ -255,6 +255,44 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     letter-spacing: 0.02em;
   }
 
+  .agent-id a, .queue-id a {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .agent-id a:hover, .queue-id a:hover,
+  .agent-title a:hover, .queue-title a:hover {
+    text-decoration: underline;
+  }
+
+  .agent-title a, .queue-title a {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .pr-chip {
+    display: inline-block;
+    margin-top: 4px;
+    padding: 1px 7px;
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--blue);
+    border: 1px solid rgba(91, 156, 246, 0.35);
+    border-radius: 2px;
+    text-decoration: none;
+    background: rgba(91, 156, 246, 0.06);
+    transition: background 0.15s, border-color 0.15s;
+  }
+
+  .pr-chip:hover {
+    background: rgba(91, 156, 246, 0.16);
+    border-color: var(--blue);
+  }
+
+  .pr-chip::before { content: '↗ '; opacity: 0.8; }
+
   .agent-status-row {
     display: flex;
     align-items: center;
@@ -292,6 +330,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .status-pill.retrying   { background: rgba(91,156,246,.1); color: var(--blue);  border: 1px solid rgba(91,156,246,.25); }
   .status-pill.pending    { background: transparent;          color: var(--muted); border: 1px solid var(--border-hi); }
   .status-pill.gate { background: rgba(232, 184, 75, 0.08); color: var(--amber-dim); border: 1px solid var(--amber-dim); }
+
+  .agent-title {
+    font-size: 12px;
+    color: var(--text);
+    font-weight: 400;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 620px;
+    margin-bottom: 4px;
+  }
 
   .agent-msg {
     font-size: 12px;
@@ -587,6 +636,160 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     color: var(--dim);
     font-weight: 300;
   }
+
+  /* ── Per-card runtime + stuck indicator ── */
+  .agent-runtime {
+    font-size: 11px;
+    color: var(--muted);
+    font-weight: 300;
+    margin-top: 4px;
+    letter-spacing: 0.02em;
+  }
+
+  .agent-card.stuck {
+    border-left: 2px solid var(--red);
+    background: linear-gradient(90deg, rgba(217,95,82,0.04), transparent 60%);
+  }
+
+  .agent-card.stuck .agent-runtime {
+    color: var(--red);
+    font-weight: 500;
+  }
+
+  .agent-card.stuck .agent-runtime::before {
+    content: '⚠ ';
+  }
+
+  /* ── CI / review badges on gate + running cards ── */
+  .ci-badges {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: 10px;
+    vertical-align: middle;
+  }
+
+  .ci-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+
+  .ci-dot.pass    { background: var(--green); }
+  .ci-dot.fail    { background: var(--red); box-shadow: 0 0 6px rgba(217,95,82,0.5); }
+  .ci-dot.pending { background: var(--muted); }
+
+  .ci-summary {
+    font-size: 10px;
+    color: var(--muted);
+    font-weight: 400;
+    letter-spacing: 0.04em;
+  }
+
+  .review-pill {
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 1px 6px;
+    border-radius: 2px;
+    border: 1px solid var(--border-hi);
+  }
+
+  .review-pill.approve         { color: var(--green); border-color: rgba(76,186,110,0.35); background: rgba(76,186,110,0.08); }
+  .review-pill.changes_requested { color: var(--red); border-color: rgba(217,95,82,0.35); background: rgba(217,95,82,0.08); }
+  .review-pill.pending         { color: var(--muted); }
+
+  /* ── Toolbar (sort + filter row) ── */
+  .toolbar-spacer { flex: 1; }
+
+  .sort-select { /* same look as filter-select */
+    background: var(--surface);
+    border: 1px solid var(--border-hi);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 11px;
+    padding: 4px 8px;
+    border-radius: 2px;
+    cursor: pointer;
+    margin-left: 8px;
+  }
+
+  .sort-select:focus { outline: none; border-color: var(--amber-dim); }
+
+  /* ── Activity feed ── */
+  #events-section { margin-bottom: 32px; }
+
+  .events-list {
+    background: var(--border);
+    border: 1px solid var(--border);
+    max-height: 360px;
+    overflow-y: auto;
+  }
+
+  .event-row {
+    display: grid;
+    grid-template-columns: 70px 90px 100px 1fr;
+    gap: 12px;
+    align-items: baseline;
+    background: var(--surface);
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+  }
+
+  .event-row:last-child { border-bottom: none; }
+  .event-row:hover      { background: #141414; }
+
+  .event-time {
+    font-size: 10px;
+    color: var(--muted);
+    letter-spacing: 0.04em;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .event-type {
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 1px 6px;
+    border-radius: 2px;
+    border: 1px solid var(--border-hi);
+    color: var(--muted);
+    text-align: center;
+    white-space: nowrap;
+  }
+
+  .event-type.dispatched     { color: var(--blue);  border-color: rgba(91,156,246,0.35);  background: rgba(91,156,246,0.06); }
+  .event-type.completed      { color: var(--green); border-color: rgba(76,186,110,0.35);  background: rgba(76,186,110,0.06); }
+  .event-type.terminal       { color: var(--green); border-color: rgba(76,186,110,0.35);  background: rgba(76,186,110,0.06); }
+  .event-type.failed         { color: var(--red);   border-color: rgba(217,95,82,0.35);   background: rgba(217,95,82,0.06); }
+  .event-type.canceled       { color: var(--red);   border-color: rgba(217,95,82,0.35);   background: rgba(217,95,82,0.06); }
+  .event-type.gate_entered,
+  .event-type.gate_approved,
+  .event-type.gate_rework,
+  .event-type.gate_escalated { color: var(--amber); border-color: var(--amber-dim);       background: rgba(232,184,75,0.06); }
+  .event-type.retry_scheduled { color: var(--blue);  border-color: rgba(91,156,246,0.35); background: rgba(91,156,246,0.06); }
+
+  .event-id {
+    font-weight: 600;
+    color: var(--amber);
+    font-size: 12px;
+    letter-spacing: 0.02em;
+  }
+
+  .event-id a { color: inherit; text-decoration: none; }
+  .event-id a:hover { text-decoration: underline; }
+
+  .event-msg {
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 </style>
 </head>
 <body>
@@ -638,13 +841,35 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="section-header">
     <span class="section-title">Active Agents</span>
     <div class="section-line"></div>
+    <select id="status-filter" class="filter-select" onchange="window.__stokowskiSetStatusFilter(this.value)">
+      <option value="">All statuses</option>
+      <option value="streaming">Live</option>
+      <option value="gate">Awaiting gate</option>
+      <option value="retrying">Retrying</option>
+      <option value="stuck">Stuck</option>
+    </select>
     <select id="project-filter" class="filter-select" onchange="window.__stokowskiSetFilter(this.value)">
       <option value="">All projects</option>
+    </select>
+    <select id="sort-select" class="sort-select" onchange="window.__stokowskiSetSort(this.value)">
+      <option value="default">Sort: default</option>
+      <option value="runtime">Longest running</option>
+      <option value="tokens">Most tokens</option>
+      <option value="status">By status</option>
     </select>
     <span class="section-count" id="agent-count">0</span>
   </div>
 
   <div id="agents-container"></div>
+
+  <div id="events-section">
+    <div class="section-header">
+      <span class="section-title">Activity</span>
+      <div class="section-line"></div>
+      <span class="section-count" id="event-count">0</span>
+    </div>
+    <div id="events-container"></div>
+  </div>
 
   <div id="queue-section" style="display:none">
     <div class="section-header">
@@ -706,13 +931,117 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     return `<span class="status-pill ${cls}">${label}</span>`;
   }
 
-  // Filter state — null means "all projects". Persisted across refreshes.
-  let activeFilter = '';
-  window.__stokowskiSetFilter = (val) => { activeFilter = val || ''; refresh(); };
+  // Filter + sort state — persisted to localStorage so reload doesn't reset.
+  function lsGet(k, fallback) {
+    try { return localStorage.getItem(k) ?? fallback; } catch { return fallback; }
+  }
+  function lsSet(k, v) {
+    try { localStorage.setItem(k, v); } catch { /* private mode etc. */ }
+  }
+  let activeFilter       = lsGet('stk:projectFilter', '');
+  let activeStatusFilter = lsGet('stk:statusFilter', '');
+  let activeSort         = lsGet('stk:sort', 'default');
+
+  window.__stokowskiSetFilter       = (val) => { activeFilter       = val || '';        lsSet('stk:projectFilter', activeFilter);       refresh(); };
+  window.__stokowskiSetStatusFilter = (val) => { activeStatusFilter = val || '';        lsSet('stk:statusFilter',  activeStatusFilter); refresh(); };
+  window.__stokowskiSetSort         = (val) => { activeSort         = val || 'default'; lsSet('stk:sort',          activeSort);         refresh(); };
+
+  // Apply persisted dropdown values once DOM is ready
+  document.addEventListener('DOMContentLoaded', () => {
+    const sf = document.getElementById('status-filter'); if (sf) sf.value = activeStatusFilter;
+    const ss = document.getElementById('sort-select');   if (ss) ss.value = activeSort;
+  });
 
   function projectMatches(item) {
     if (!activeFilter) return true;
     return (item.project_name || '') === activeFilter;
+  }
+
+  // Stuck = no agent activity (last_event_at) for >= STUCK_THRESHOLD_MS while
+  // status is one that should be progressing. Idle gate/retry cards are NOT
+  // stuck — they're waiting deliberately.
+  const STUCK_THRESHOLD_MS = 5 * 60 * 1000;
+  function isStuck(r) {
+    if (r.status !== 'streaming') return false;
+    const lea = r.last_event_at ? Date.parse(r.last_event_at) : NaN;
+    if (!Number.isFinite(lea)) return false;
+    return (Date.now() - lea) >= STUCK_THRESHOLD_MS;
+  }
+
+  function runtimeMs(r) {
+    if (!r.started_at) return 0;
+    const t = Date.parse(r.started_at);
+    return Number.isFinite(t) ? Math.max(0, Date.now() - t) : 0;
+  }
+
+  function fmtDur(ms) {
+    if (!ms) return '—';
+    const s = Math.floor(ms / 1000);
+    if (s < 60)   return s + 's';
+    if (s < 3600) return Math.floor(s/60) + 'm ' + (s%60) + 's';
+    return Math.floor(s/3600) + 'h ' + Math.floor((s%3600)/60) + 'm';
+  }
+
+  function relTime(iso) {
+    if (!iso) return '—';
+    const t = Date.parse(iso);
+    if (!Number.isFinite(t)) return '—';
+    const delta = Math.max(0, Date.now() - t);
+    if (delta < 60_000)        return Math.floor(delta/1000) + 's ago';
+    if (delta < 3_600_000)     return Math.floor(delta/60_000) + 'm ago';
+    if (delta < 86_400_000)    return Math.floor(delta/3_600_000) + 'h ago';
+    return Math.floor(delta/86_400_000) + 'd ago';
+  }
+
+  function statusMatches(r) {
+    if (!activeStatusFilter) return true;
+    if (activeStatusFilter === 'stuck') return isStuck(r);
+    return r.status === activeStatusFilter;
+  }
+
+  // Sort comparator factory — returns a comparator for the active sort mode.
+  // Status order is roughly "needs attention first": stuck > failed/retrying > gate > streaming > pending.
+  function statusRank(r) {
+    if (isStuck(r)) return 0;
+    return ({
+      retrying: 1, failed: 1,
+      gate: 2,
+      streaming: 3,
+      succeeded: 4,
+      pending: 5,
+    })[r.status] ?? 9;
+  }
+  function getComparator() {
+    if (activeSort === 'runtime') return (a, b) => runtimeMs(b) - runtimeMs(a);
+    if (activeSort === 'tokens')  return (a, b) => (b.tokens?.total_tokens || 0) - (a.tokens?.total_tokens || 0);
+    if (activeSort === 'status')  return (a, b) => statusRank(a) - statusRank(b)
+                                                    || (b.tokens?.total_tokens || 0) - (a.tokens?.total_tokens || 0);
+    return () => 0; // 'default' — preserve incoming order
+  }
+
+  function ciBadgesHtml(ci) {
+    if (!ci) return '';
+    const c = ci.checks || {};
+    const total   = c.total   || 0;
+    const passing = c.passing || 0;
+    const failing = c.failing || 0;
+    const pending = c.pending || 0;
+    const dots = [];
+    for (let i = 0; i < failing; i++) dots.push('<span class="ci-dot fail"></span>');
+    for (let i = 0; i < pending; i++) dots.push('<span class="ci-dot pending"></span>');
+    for (let i = 0; i < passing; i++) dots.push('<span class="ci-dot pass"></span>');
+    const dotsHtml = dots.slice(0, 8).join('');
+    const summary = total
+      ? `<span class="ci-summary">${passing}/${total}${failing ? ` · ${failing} failing` : ''}</span>`
+      : '';
+    const review = ci.review;
+    const reviewLabel = review === 'approve' ? 'approved'
+                      : review === 'changes_requested' ? 'changes'
+                      : review === 'pending' ? 'review pending'
+                      : '';
+    const reviewHtml = reviewLabel ? `<span class="review-pill ${review}">${reviewLabel}</span>` : '';
+    if (!dotsHtml && !summary && !reviewHtml) return '';
+    return `<span class="ci-badges" title="updated ${esc(relTime(ci.updated_at))}">${dotsHtml}${summary}${reviewHtml}</span>`;
   }
 
   async function togglePause(name) {
@@ -793,13 +1122,23 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     document.getElementById('queue-container').innerHTML =
       `<div class="agents">` + queue.map(q => {
         const pausedReason = (q.reason || '').toLowerCase().includes('paused');
+        const idHtml = q.url
+          ? `<a href="${esc(q.url)}" target="_blank" rel="noopener noreferrer">${esc(q.issue_identifier)}</a>`
+          : esc(q.issue_identifier);
+        const titleText = q.title || '—';
+        const titleHtml = q.url
+          ? `<a href="${esc(q.url)}" target="_blank" rel="noopener noreferrer">${esc(titleText)}</a>`
+          : esc(titleText);
+        const prChip = q.pr_url
+          ? ` <a class="pr-chip" href="${esc(q.pr_url)}" target="_blank" rel="noopener noreferrer">PR</a>`
+          : '';
         return `
           <div class="queue-card">
             <div>
-              <div class="queue-id">${esc(q.issue_identifier)}</div>
+              <div class="queue-id">${idHtml}</div>
               ${q.project_name ? `<div class="agent-project">${esc(q.project_name)}</div>` : ''}
             </div>
-            <div class="queue-title">${esc(q.title || '—')}</div>
+            <div class="queue-title">${titleHtml}${prChip}</div>
             <div class="queue-reason ${pausedReason ? 'paused' : ''}">${esc(q.reason || '')}</div>
           </div>`;
       }).join('') + `</div>`;
@@ -811,6 +1150,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       ...(data.retrying || []).map(r => ({
         issue_identifier: r.issue_identifier,
         project_name: r.project_name,
+        title: r.title,
+        url: r.url,
+        pr_url: r.pr_url,
+        ci_status: r.ci_status,
         status: 'retrying',
         turn_count: r.attempt,
         tokens: { total_tokens: 0 },
@@ -820,6 +1163,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       ...(data.gates || []).map(g => ({
         issue_identifier: g.issue_identifier,
         project_name: g.project_name,
+        title: g.title,
+        url: g.url,
+        pr_url: g.pr_url,
+        ci_status: g.ci_status,
         status: 'gate',
         state_name: g.gate_state,
         turn_count: g.run,
@@ -827,43 +1174,101 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         last_message: 'Awaiting human review',
         session_id: null,
       })),
-    ].filter(projectMatches);
+    ].filter(projectMatches).filter(statusMatches);
+
+    all.sort(getComparator());
 
     document.getElementById('agent-count').textContent = all.length;
 
     if (all.length === 0) {
+      const filterActive = activeFilter || activeStatusFilter;
       document.getElementById('agents-container').innerHTML = `
         <div class="empty">
-          <div class="empty-title">No active agents</div>
-          <div class="empty-sub">Move a Linear issue to Todo or In Progress to start</div>
+          <div class="empty-title">${filterActive ? 'No agents match your filters' : 'No active agents'}</div>
+          <div class="empty-sub">${filterActive ? 'Adjust the filters above to see more' : 'Move a Linear issue to Todo or In Progress to start'}</div>
         </div>`;
       return;
     }
 
     const rows = all.map(r => {
+      const stuck = isStuck(r);
       const stateInfo = r.state_name ? `<span style="color:var(--muted);font-size:11px;margin-left:8px">${esc(r.state_name)}</span>` : '';
       const projTag = r.project_name ? `<div class="agent-project">${esc(r.project_name)}</div>` : '';
+      const idHtml = r.url
+        ? `<a href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">${esc(r.issue_identifier)}</a>`
+        : esc(r.issue_identifier);
+      const titleHtml = r.title
+        ? (r.url
+            ? `<a href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">${esc(r.title)}</a>`
+            : esc(r.title))
+        : '';
+      const titleRow = titleHtml ? `<div class="agent-title" title="${esc(r.title)}">${titleHtml}</div>` : '';
+      const prChip = r.pr_url
+        ? `<a class="pr-chip" href="${esc(r.pr_url)}" target="_blank" rel="noopener noreferrer">PR</a>`
+        : '';
+      const ciHtml = ciBadgesHtml(r.ci_status);
+      // Runtime / stuck — only meaningful for live runs (started_at present)
+      const rt = runtimeMs(r);
+      const runtimeRow = rt
+        ? `<div class="agent-runtime">${stuck ? 'no activity for ' + fmtDur(Date.now() - Date.parse(r.last_event_at)) : 'running ' + fmtDur(rt)}</div>`
+        : '';
       return `
-      <div class="agent-card">
+      <div class="agent-card${stuck ? ' stuck' : ''}">
         <div>
-          <div class="agent-id">${esc(r.issue_identifier)}</div>
+          <div class="agent-id">${idHtml}</div>
           ${projTag}
+          ${prChip}
         </div>
         <div>
           <div class="agent-status-row">
-            ${statusPill(r.status)}${stateInfo}
+            ${statusPill(r.status)}${stateInfo}${ciHtml}
           </div>
+          ${titleRow}
           <div class="agent-msg">${esc(r.last_message || '—')}</div>
         </div>
         <div class="agent-meta">
           <div class="agent-tokens">${fmt(r.tokens?.total_tokens || 0)} tok</div>
           <div class="agent-turns">turn ${r.turn_count || 0}</div>
+          ${runtimeRow}
         </div>
       </div>`;
     }).join('');
 
     document.getElementById('agents-container').innerHTML =
       `<div class="agents">${rows}</div>`;
+  }
+
+  function renderEvents(data) {
+    const events = data.events || [];
+    const section = document.getElementById('events-section');
+    // Filter events by active project filter for consistency with the rest of the dashboard
+    const filtered = events.filter(e => !activeFilter || e.project === activeFilter);
+    document.getElementById('event-count').textContent = filtered.length;
+    if (filtered.length === 0) {
+      section.querySelector('#events-container').innerHTML = `
+        <div class="empty">
+          <div class="empty-title">${events.length === 0 ? 'No activity yet' : 'No matching events'}</div>
+          <div class="empty-sub">${events.length === 0
+            ? 'Lifecycle events will appear here as the orchestrator dispatches and transitions tickets'
+            : 'Adjust the project filter to see more'}</div>
+        </div>`;
+      return;
+    }
+    const rows = filtered.map(e => {
+      const idHtml = e.issue_url
+        ? `<a href="${esc(e.issue_url)}" target="_blank" rel="noopener noreferrer">${esc(e.issue_identifier)}</a>`
+        : esc(e.issue_identifier);
+      const typeCls = (e.type || '').replace(/[^a-z0-9_]/gi, '_');
+      return `
+        <div class="event-row">
+          <div class="event-time" title="${esc(e.ts)}">${esc(relTime(e.ts))}</div>
+          <div class="event-type ${typeCls}">${esc((e.type || '').replace(/_/g, ' '))}</div>
+          <div class="event-id">${idHtml}</div>
+          <div class="event-msg" title="${esc(e.message || '')}">${esc(e.message || '—')}</div>
+        </div>`;
+    }).join('');
+    section.querySelector('#events-container').innerHTML =
+      `<div class="events-list">${rows}</div>`;
   }
 
   async function refresh() {
@@ -907,6 +1312,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       renderProjects(data);
       renderAgents(data);
       renderQueue(data);
+      renderEvents(data);
     } catch(e) {
       document.getElementById('status-dot').className = 'status-dot idle';
     }
@@ -930,6 +1336,40 @@ def create_app(orchestrator: "MultiOrchestrator") -> FastAPI:
     @app.get("/api/v1/state")
     async def api_state():
         return JSONResponse(orchestrator.get_state_snapshot())
+
+    @app.get("/api/v1/events")
+    async def api_events(since: str | None = None, limit: int = 200):
+        """Return lifecycle events (newest first).
+
+        Query params:
+          since: ISO 8601 timestamp; only events with ts > since are returned.
+          limit: max number of events to return (default 200, max 500).
+
+        Registered before ``/api/v1/{issue_identifier}`` so the literal
+        path wins the FastAPI route match.
+        """
+        try:
+            limit_int = int(limit)
+        except (TypeError, ValueError):
+            limit_int = 200
+        if limit_int < 1:
+            limit_int = 1
+        if limit_int > 500:
+            limit_int = 500
+
+        # Newest first
+        all_events = list(reversed(orchestrator.events))
+
+        if since:
+            filtered = [e for e in all_events if e.ts > since]
+        else:
+            filtered = all_events
+
+        from dataclasses import asdict as _asdict
+
+        return JSONResponse(
+            {"events": [_asdict(e) for e in filtered[:limit_int]]}
+        )
 
     @app.get("/api/v1/{issue_identifier}")
     async def api_issue(issue_identifier: str):

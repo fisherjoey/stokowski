@@ -23,6 +23,7 @@ class Issue:
     state: str = ""
     branch_name: str | None = None
     url: str | None = None
+    pr_url: str | None = None
     labels: list[str] = field(default_factory=list)
     blocked_by: list[BlockerRef] = field(default_factory=list)
     created_at: datetime | None = None
@@ -57,3 +58,22 @@ class RetryEntry:
     attempt: int = 1
     due_at_ms: float = 0
     error: str | None = None
+
+
+@dataclass
+class Event:
+    """Lifecycle event captured in the orchestrator's ring buffer.
+
+    Used by the dashboard activity feed so operators can see what
+    happened while they were away (dispatches, gate transitions,
+    retries, terminal moves, etc.).
+    """
+    ts: str              # ISO 8601 UTC
+    type: str
+    project: str
+    issue_id: str
+    issue_identifier: str
+    issue_url: str | None = None
+    pr_url: str | None = None
+    state_name: str | None = None
+    message: str = ""
