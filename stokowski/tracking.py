@@ -12,6 +12,7 @@ logger = logging.getLogger("stokowski.tracking")
 
 STATE_PATTERN = re.compile(r"<!-- stokowski:state ({.*?}) -->")
 GATE_PATTERN = re.compile(r"<!-- stokowski:gate ({.*?}) -->")
+REWORK_TRIGGER_PATTERN = re.compile(r"<!-- stokowski:rework-trigger ({.*?}) -->")
 
 
 def make_state_comment(state: str, run: int = 1) -> str:
@@ -102,6 +103,55 @@ def parse_latest_tracking(comments: list[dict]) -> dict[str, Any] | None:
                 pass
 
     return latest
+
+
+def parse_latest_rework_trigger(comments: list[dict]) -> dict[str, Any] | None:
+    """Return the most-recent stokowski:rework-trigger payload, or None.
+
+    Pollers (poll-ci-status, poll-pr-conflicts) post these markers when they
+    apply the `needs-rework` label. The orchestrator reads the latest one on
+    pickup to extract reason + detector for the dispatch prompt context.
+
+    Payload shape: {"reason": str, "detector": str, "pr_number"?: int}.
+    The returned dict is the parsed JSON unchanged.
+    """
+    latest: dict[str, Any] | None = None
+    for comment in comments:
+        body = comment.get("body", "")
+        match = REWORK_TRIGGER_PATTERN.search(body)
+        if match:
+            try:
+                latest = json.loads(match.group(1))
+            except json.JSONDecodeError:
+                pass
+    return latest
+
+
+def make_rework_trigger_comment(
+    reason: str,
+    detector: str,
+    pr_number: int | None = None,
+    note: str | None = None,
+) -> str:
+    """Build a rework-trigger marker comment for pollers to post.
+
+    Pollers in synced-sport use raw GraphQL and embed the marker directly;
+    this helper exists so the marker format stays in lockstep with the
+    parser and is easy to update in one place.
+    """
+    payload: dict[str, Any] = {
+        "reason": reason,
+        "detector": detector,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    if pr_number is not None:
+        payload["pr_number"] = pr_number
+    machine = f"<!-- stokowski:rework-trigger {json.dumps(payload)} -->"
+    human = note or (
+        f"**[Stokowski]** Rework triggered: `{reason}` "
+        f"(detected by `{detector}`)."
+    )
+    return f"{machine}\n\n{human}"
 
 
 def get_last_tracking_timestamp(comments: list[dict]) -> str | None:

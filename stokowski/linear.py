@@ -152,6 +152,26 @@ query($issueId: String!) {
 }
 """
 
+ISSUE_LABELS_QUERY = """
+query($issueId: String!) {
+  issue(id: $issueId) {
+    labels { nodes { id name } }
+    team {
+      labels { nodes { id name } }
+    }
+  }
+}
+"""
+
+ISSUE_LABELS_UPDATE_MUTATION = """
+mutation($issueId: String!, $labels: [String!]!) {
+  issueUpdate(id: $issueId, input: { labelIds: $labels }) {
+    success
+    issue { id labels { nodes { name } } }
+  }
+}
+"""
+
 
 def _parse_datetime(val: str | None) -> datetime | None:
     if not val:
@@ -369,6 +389,71 @@ class LinearClient:
         except Exception as e:
             logger.error(f"Failed to fetch comments for {issue_id}: {e}")
             return []
+
+    async def _fetch_labels(self, issue_id: str) -> tuple[list[dict], list[dict]]:
+        """Return (issue_labels, team_labels) for label add/remove plumbing.
+
+        Linear's GraphQL labels are owned by the team; an issue carries a set
+        of labelIds. To toggle a label we must look up the team's label by
+        name to get its ID, then write the full label set via issueUpdate.
+        """
+        data = await self._graphql(ISSUE_LABELS_QUERY, {"issueId": issue_id})
+        issue = data.get("issue", {}) or {}
+        issue_labels = (issue.get("labels", {}) or {}).get("nodes", [])
+        team_labels = (
+            (issue.get("team", {}) or {}).get("labels", {}) or {}
+        ).get("nodes", [])
+        return issue_labels, team_labels
+
+    async def add_label_by_name(self, issue_id: str, label_name: str) -> bool:
+        """Ensure the named label is applied to the issue. Idempotent."""
+        try:
+            issue_labels, team_labels = await self._fetch_labels(issue_id)
+            label_id = next(
+                (l["id"] for l in team_labels
+                 if l.get("name", "").strip().lower()
+                 == label_name.strip().lower()),
+                None,
+            )
+            if label_id is None:
+                logger.error(
+                    f"Label '{label_name}' not found on team for issue {issue_id}"
+                )
+                return False
+            current = [l["id"] for l in issue_labels]
+            if label_id in current:
+                return True
+            new_labels = current + [label_id]
+            result = await self._graphql(
+                ISSUE_LABELS_UPDATE_MUTATION,
+                {"issueId": issue_id, "labels": new_labels},
+            )
+            return result.get("issueUpdate", {}).get("success", False)
+        except Exception as e:
+            logger.error(f"Failed to add label '{label_name}' to {issue_id}: {e}")
+            return False
+
+    async def remove_label_by_name(self, issue_id: str, label_name: str) -> bool:
+        """Ensure the named label is NOT on the issue. Idempotent."""
+        try:
+            issue_labels, _ = await self._fetch_labels(issue_id)
+            target = label_name.strip().lower()
+            remaining = [
+                l["id"] for l in issue_labels
+                if l.get("name", "").strip().lower() != target
+            ]
+            if len(remaining) == len(issue_labels):
+                return True  # label not present
+            result = await self._graphql(
+                ISSUE_LABELS_UPDATE_MUTATION,
+                {"issueId": issue_id, "labels": remaining},
+            )
+            return result.get("issueUpdate", {}).get("success", False)
+        except Exception as e:
+            logger.error(
+                f"Failed to remove label '{label_name}' from {issue_id}: {e}"
+            )
+            return False
 
     async def update_issue_state(self, issue_id: str, state_name: str) -> bool:
         """Move an issue to a new state by name. Returns True on success."""

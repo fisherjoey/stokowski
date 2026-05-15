@@ -411,6 +411,13 @@ def cli():
     _load_dotenv()
     setup_logging(args.verbose)
 
+    # STOKOWSKI_DRY_RUN=1 runs a single reconcile pass against the live Linear
+    # tracker, seeding/syncing state.db without dispatching any workers, then
+    # exits. Used to validate cutover before flipping the systemd unit.
+    if os.environ.get("STOKOWSKI_DRY_RUN") == "1":
+        asyncio.run(durable_dry_run(args.workflow))
+        return
+
     if args.dry_run:
         asyncio.run(dry_run(args.workflow))
     else:
@@ -445,6 +452,67 @@ def _force_kill_children():
 
 
 # ── Dry run ───────────────────────────────────────────────────────────────────
+
+async def durable_dry_run(workflow_path: str):
+    """STOKOWSKI_DRY_RUN=1: seed/reconcile the state.db against live Linear,
+    then summarise the resulting row count and pending_gate distribution.
+
+    Used to validate cutover before flipping the systemd WorkingDirectory.
+    No workers are dispatched.
+    """
+    from .config import parse_workflow_file, validate_config
+    from .orchestrator import DEFAULT_DB_PATH, Orchestrator
+    from .storage import StateStore
+
+    console.print("[bold]Durable dry-run (STOKOWSKI_DRY_RUN=1)[/bold]\n")
+    db_path_override = os.environ.get("STOKOWSKI_DB_PATH")
+    db_path = Path(db_path_override) if db_path_override else DEFAULT_DB_PATH
+    console.print(f"State DB: {db_path}")
+
+    try:
+        workflow = parse_workflow_file(workflow_path)
+    except Exception as e:
+        console.print(f"[red]Failed to load workflow: {e}[/red]")
+        sys.exit(1)
+
+    errors = validate_config(workflow.config)
+    if errors:
+        for e in errors:
+            console.print(f"[red]Config error: {e}[/red]")
+        sys.exit(1)
+
+    store = StateStore(db_path)
+    try:
+        for project in workflow.config.projects:
+            console.print(f"\n[bold cyan]Project '{project.name}'[/bold cyan]")
+            orch = Orchestrator(
+                workflow_path=workflow_path,
+                project_name=project.name,
+                store=store,
+            )
+            err = orch._load_workflow()
+            if err:
+                console.print(f"  [red]Load error: {err}[/red]")
+                continue
+            await orch._reconcile_from_storage(initial=True)
+
+            rows = store.list_active(project.name)
+            console.print(f"  rows: {len(rows)}")
+            gate_dist: dict[str, int] = {}
+            for r in rows:
+                key = r.pending_gate or "(active)"
+                gate_dist[key] = gate_dist.get(key, 0) + 1
+            console.print(f"  pending_gate distribution: {gate_dist}")
+            for r in rows:
+                console.print(
+                    f"    {r.issue_identifier}  state={r.internal_state}  "
+                    f"gate={r.pending_gate or '-'}"
+                )
+            if orch._linear is not None:
+                await orch._linear.close()
+    finally:
+        store.close()
+
 
 async def dry_run(workflow_path: str):
     from .config import parse_workflow_file, validate_config

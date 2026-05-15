@@ -30,8 +30,18 @@ from .models import Issue, RetryEntry, RunAttempt
 from .pool import ConcurrencyPool
 from .prompt import assemble_prompt, build_lifecycle_section
 from .runner import run_agent_turn, run_turn
-from .tracking import make_gate_comment, make_state_comment, parse_latest_tracking
+from .storage import StateStore
+from .tracking import (
+    make_gate_comment,
+    make_state_comment,
+    parse_latest_rework_trigger,
+    parse_latest_tracking,
+)
 from .workspace import ensure_workspace, remove_workspace
+
+NEEDS_REWORK_LABEL = "needs-rework"
+REWORK_ESCALATED_LABEL = "rework-escalated"
+DEFAULT_DB_PATH = Path("~/.local/share/stokowski/state.db").expanduser()
 
 logger = logging.getLogger("stokowski")
 
@@ -42,6 +52,7 @@ class Orchestrator:
         workflow_path: str | Path,
         project_name: str | None = None,
         pool: ConcurrencyPool | None = None,
+        store: StateStore | None = None,
     ):
         """Run one project's dispatch loop.
 
@@ -59,6 +70,10 @@ class Orchestrator:
         self.project_name = project_name
         self.project: ProjectConfig | None = None
         self.pool = pool
+        # Durable orchestrator state. If no store is provided (single-process
+        # tests / standalone use), open one at the default path.
+        self.store: StateStore = store if store is not None else StateStore(DEFAULT_DB_PATH)
+        self._owns_store = store is None
 
         # Runtime state
         self.running: dict[str, RunAttempt] = {}  # issue_id -> RunAttempt
@@ -216,9 +231,9 @@ class Orchestrator:
         # Startup terminal cleanup
         await self._startup_cleanup()
 
-        # Rebuild gates from Linear so the dashboard is accurate immediately
-        # after restart, not only after Stokowski dispatches in-flight tickets
-        await self._rebuild_gates_from_linear()
+        # Reconcile from durable state: seed on first run, or reconcile any
+        # Linear-side changes that happened while we were down.
+        await self._reconcile_from_storage(initial=True)
 
         # Main poll loop
         while self._running:
@@ -265,6 +280,12 @@ class Orchestrator:
         if self._linear:
             await self._linear.close()
 
+        if self._owns_store:
+            try:
+                self.store.close()
+            except Exception:
+                pass
+
     async def _startup_cleanup(self):
         """Remove workspaces for issues already in terminal states."""
         try:
@@ -283,74 +304,44 @@ class Orchestrator:
 
     async def _resolve_current_state(self, issue: Issue) -> tuple[str, int]:
         """Resolve current state machine state for an issue.
-        Returns (state_name, run).
+
+        Reads from the durable store first; falls back to entry state for
+        truly new tickets. Comment-parsing is reserved for the one-time
+        empty-DB seed in `_seed_from_linear`.
         """
-        # Check cache first
+        # Hot cache hit
         if issue.id in self._issue_current_state:
             state_name = self._issue_current_state[issue.id]
             run = self._issue_state_runs.get(issue.id, 1)
             return state_name, run
 
-        # Fetch comments from Linear and parse latest tracking
-        client = self._ensure_linear_client()
-        comments = await client.fetch_comments(issue.id)
-        tracking = parse_latest_tracking(comments)
-
         entry = self.cfg.entry_state
         if entry is None:
             raise RuntimeError("No entry state defined in config")
 
-        # No tracking → entry state, run 1
-        if tracking is None:
-            self._issue_current_state[issue.id] = entry
-            self._issue_state_runs[issue.id] = 1
-            return entry, 1
+        # Durable store
+        row = self.store.get_issue(issue.id)
+        if row is not None and row.internal_state in self.cfg.states:
+            state_name = row.internal_state
+            self._issue_current_state[issue.id] = state_name
+            if row.pending_gate:
+                self._pending_gates[issue.id] = row.pending_gate
+                run = self.store.get_run(issue.id, row.pending_gate)
+            else:
+                run = 1
+            self._issue_state_runs[issue.id] = run
+            return state_name, run
 
-        if tracking["type"] == "state":
-            state_name = tracking.get("state", entry)
-            run = tracking.get("run", 1)
-            if state_name in self.cfg.states:
-                self._issue_current_state[issue.id] = state_name
-                self._issue_state_runs[issue.id] = run
-                return state_name, run
-            # Unknown state → fallback to entry
-            self._issue_current_state[issue.id] = entry
-            self._issue_state_runs[issue.id] = 1
-            return entry, 1
-
-        if tracking["type"] == "gate":
-            gate_state = tracking.get("state", "")
-            status = tracking.get("status", "")
-            run = tracking.get("run", 1)
-
-            if status == "waiting":
-                if gate_state in self.cfg.states:
-                    self._issue_current_state[issue.id] = gate_state
-                    self._issue_state_runs[issue.id] = run
-                    self._pending_gates[issue.id] = gate_state
-                    return gate_state, run
-
-            elif status == "approved":
-                gate_cfg = self.cfg.states.get(gate_state)
-                if gate_cfg and "approve" in gate_cfg.transitions:
-                    target = gate_cfg.transitions["approve"]
-                    self._issue_current_state[issue.id] = target
-                    self._issue_state_runs[issue.id] = run
-                    return target, run
-
-            elif status == "rework":
-                gate_cfg = self.cfg.states.get(gate_state)
-                rework_to = tracking.get("rework_to", "")
-                if not rework_to and gate_cfg:
-                    rework_to = gate_cfg.rework_to or ""
-                if rework_to and rework_to in self.cfg.states:
-                    self._issue_current_state[issue.id] = rework_to
-                    self._issue_state_runs[issue.id] = run
-                    return rework_to, run
-
-        # Fallback to entry state
+        # Brand-new ticket: enter at entry state, write through.
         self._issue_current_state[issue.id] = entry
         self._issue_state_runs[issue.id] = 1
+        self.store.upsert_issue(
+            issue_id=issue.id,
+            issue_identifier=issue.identifier,
+            project_name=self.project_name or "",
+            internal_state=entry,
+            pending_gate=None,
+        )
         return entry, 1
 
     async def _safe_enter_gate(self, issue: Issue, state_name: str):
@@ -365,13 +356,33 @@ class Orchestrator:
             )
 
     async def _enter_gate(self, issue: Issue, state_name: str):
-        """Move issue to gate state and post tracking comment."""
+        """Move issue to gate state and post tracking comment.
+
+        Write order per spec §Write order — durable before observable:
+          1) SQLite (pending_gate + internal_state)
+          2) Linear audit comment
+          3) Linear state move
+        """
         state_cfg = self.cfg.states.get(state_name)
         prompt = state_cfg.prompt if state_cfg else ""
         run = self._issue_state_runs.get(issue.id, 1)
 
+        # 1) Durable write first. Clearing rework context here means the
+        # next reconcile sees this dispatch as completed — agent finished
+        # the rework_to state and reached the gate.
+        with self.store.transaction() as s:
+            s.upsert_issue(
+                issue_id=issue.id,
+                issue_identifier=issue.identifier,
+                project_name=self.project_name or "",
+                internal_state=state_name,
+                pending_gate=state_name,
+            )
+            s.clear_rework_context(issue.id)
+
         client = self._ensure_linear_client()
 
+        # 2) Linear audit comment.
         comment = make_gate_comment(
             state=state_name,
             status="waiting",
@@ -466,7 +477,11 @@ class Orchestrator:
         run = self._issue_state_runs.get(issue.id, 1)
 
         if target_cfg.type == "terminal":
-            # Move issue to terminal state
+            # 1) Durable first: clear pending_gate + internal_state.
+            with self.store.transaction() as s:
+                s.set_pending_gate(issue.id, None)
+                s.set_internal_state(issue.id, None)
+            # 2) Linear state move.
             terminal_state = self.cfg.terminal_linear_states()[0] if self.cfg.terminal_linear_states() else "Done"
             try:
                 client = self._ensure_linear_client()
@@ -496,8 +511,9 @@ class Orchestrator:
             await self._enter_gate(issue, target_name)
 
         else:
-            # Agent state — post state comment, ensure active Linear state, schedule retry
+            # Agent state — durable write, post state comment, ensure active, schedule retry.
             self._issue_current_state[issue.id] = target_name
+            self.store.set_internal_state(issue.id, target_name)
             client = self._ensure_linear_client()
             comment = make_state_comment(
                 state=target_name,
@@ -514,7 +530,15 @@ class Orchestrator:
             self._schedule_retry(issue, attempt_num=0, delay_ms=1000)
 
     async def _handle_gate_responses(self):
-        """Check for gate-approved and rework issues, handle transitions."""
+        """Check for gate-approved and label-driven rework, handle transitions.
+
+        Rework signal: `needs-rework` label on a ticket we are tracking.
+        Pollers apply it + post a `stokowski:rework-trigger` marker; we read
+        the marker for reason/detector, bump the per-gate run counter, write
+        durable state, then move the ticket back to active and dispatch.
+
+        Gate approval signal: ticket moved to `Gate Approved` Linear state.
+        """
         # Early return if no gate states in config
         has_gates = any(sc.type == "gate" for sc in self.cfg.states.values())
         if not has_gates:
@@ -522,7 +546,7 @@ class Orchestrator:
 
         client = self._ensure_linear_client()
 
-        # Fetch gate-approved issues
+        # 1) Gate-approved (state-based signal, unchanged)
         try:
             approved_issues = await client.fetch_issues_by_states(
                 self.cfg.tracker.project_slug,
@@ -538,10 +562,9 @@ class Orchestrator:
 
             gate_state = self._pending_gates.pop(issue.id, None)
             if not gate_state:
-                comments = await client.fetch_comments(issue.id)
-                tracking = parse_latest_tracking(comments)
-                if tracking and tracking.get("type") == "gate" and tracking.get("status") == "waiting":
-                    gate_state = tracking.get("state", "")
+                row = self.store.get_issue(issue.id)
+                if row and row.pending_gate:
+                    gate_state = row.pending_gate
 
             if gate_state:
                 run = self._issue_state_runs.get(issue.id, 1)
@@ -551,240 +574,426 @@ class Orchestrator:
                 await client.post_comment(issue.id, comment)
 
                 # Set current state to the gate so _transition can read FROM it,
-                # then route through _transition. This dispatches the approve
-                # transition through the existing target-type logic, which
-                # correctly handles terminal targets (move to terminal Linear
-                # state + clean up workspace), gate targets (enter the new
-                # gate), and agent targets (post state comment + move to active
-                # Linear state + schedule retry).
-                #
-                # Previously this branch unconditionally moved the Linear ticket
-                # to `active` regardless of the approve target's type, which left
-                # tickets stuck in `In Progress` forever for any workflow whose
-                # gate transitions directly to a terminal state.
+                # then route through _transition for the approve target.
                 self._issue_current_state[issue.id] = gate_state
                 self._last_issues[issue.id] = issue
                 await self._transition(issue, "approve")
                 logger.info(f"Gate approved issue={issue.identifier} gate={gate_state}")
 
-        # Fetch rework issues
-        try:
-            rework_issues = await client.fetch_issues_by_states(
-                self.cfg.tracker.project_slug,
-                [self.cfg.linear_states.rework],
-            )
-        except Exception as e:
-            logger.warning(f"Failed to fetch rework issues: {e}")
-            rework_issues = []
+        # 2) Label-driven rework — already covered in _reconcile_from_storage,
+        #    which runs in the same tick. Keeping this method focused on the
+        #    gate-approved path avoids two passes over the same data.
 
-        for issue in rework_issues:
-            if issue.id in self.running or issue.id in self.claimed:
-                continue
+    async def _seed_from_linear(self) -> int:
+        """One-time migration: populate the durable store from Linear.
 
-            gate_state = self._pending_gates.pop(issue.id, None)
-            if not gate_state:
-                comments = await client.fetch_comments(issue.id)
-                tracking = parse_latest_tracking(comments)
-                if tracking and tracking.get("type") == "gate" and tracking.get("status") == "waiting":
-                    gate_state = tracking.get("state", "")
+        Called when the issue_state table is empty for this project. Walks
+        every non-terminal ticket, parses its latest `stokowski:state` or
+        `stokowski:gate` comment, and writes the resulting internal_state /
+        pending_gate / run counter to SQLite.
 
-            if gate_state:
-                gate_cfg = self.cfg.states.get(gate_state)
-                rework_to = gate_cfg.rework_to if gate_cfg else ""
-                if not rework_to:
-                    logger.warning(f"Gate {gate_state} has no rework_to target, skipping")
-                    continue
-
-                # Check max_rework
-                run = self._issue_state_runs.get(issue.id, 1)
-                max_rework = gate_cfg.max_rework if gate_cfg else None
-                if max_rework is not None and run >= max_rework:
-                    # Exceeded max rework ceiling — post escalated comment and move
-                    # the ticket to Human Review so it is visible to humans and so
-                    # poll-stuck-rework cannot resurrect it back to Todo.
-                    comment = make_gate_comment(
-                        state=gate_state, status="escalated", run=run,
-                    )
-                    await client.post_comment(issue.id, comment)
-                    escalate_state = self.cfg.linear_states.review
-                    moved = await client.update_issue_state(issue.id, escalate_state)
-                    if moved:
-                        # Remove from pending-gates / state cache so the ticket
-                        # isn't picked up again on the next poll cycle.
-                        self._pending_gates.pop(issue.id, None)
-                        self._issue_current_state.pop(issue.id, None)
-                    logger.warning(
-                        f"Max rework exceeded issue={issue.identifier} "
-                        f"gate={gate_state} run={run} max={max_rework}"
-                        + (f" → escalated to '{escalate_state}'" if moved
-                           else f" (failed to move to '{escalate_state}')")
-                    )
-                    continue
-
-                new_run = run + 1
-                self._issue_state_runs[issue.id] = new_run
-
-                comment = make_gate_comment(
-                    state=gate_state, status="rework",
-                    rework_to=rework_to, run=new_run,
-                )
-                await client.post_comment(issue.id, comment)
-
-                self._issue_current_state[issue.id] = rework_to
-
-                active_state = self.cfg.linear_states.active
-                moved = await client.update_issue_state(issue.id, active_state)
-                if moved:
-                    issue.state = active_state
-                else:
-                    logger.warning(f"Failed to move {issue.identifier} to active after rework")
-                self._last_issues[issue.id] = issue
-                logger.info(
-                    f"Rework issue={issue.identifier} gate={gate_state} "
-                    f"rework_to={rework_to} run={new_run}"
-                )
-
-    async def _evict_terminal_gates(self):
-        """Evict gate entries for tickets that have moved to terminal states.
-
-        Runs each tick so stale Done/Canceled/Duplicate entries are removed
-        within one poll cycle without requiring a manual POST /api/v1/refresh.
-        This fixes the failure mode where tickets advanced to Done in Linear
-        remain in the gates list indefinitely.
+        Returns the count of seeded rows.
         """
-        if not self._pending_gates:
-            return
-
-        gate_ids = list(self._pending_gates.keys())
-        try:
-            client = self._ensure_linear_client()
-            states = await client.fetch_issue_states_by_ids(gate_ids)
-        except Exception as e:
-            logger.warning(f"Gate eviction state fetch failed: {e}")
-            return
-
-        terminal_lower = {s.strip().lower() for s in self.cfg.terminal_linear_states()}
-
-        for issue_id in gate_ids:
-            current_state = states.get(issue_id)
-            if current_state is None:
-                continue
-            if current_state.strip().lower() in terminal_lower:
-                gate_state = self._pending_gates.pop(issue_id, None)
-                self._issue_current_state.pop(issue_id, None)
-                self._issue_state_runs.pop(issue_id, None)
-                self._last_session_ids.pop(issue_id, None)
-                self.claimed.discard(issue_id)
-                ident = self._last_issues.get(
-                    issue_id, Issue(id="", identifier=issue_id, title="")
-                ).identifier
-                logger.info(
-                    f"Gate evicted issue={ident} was={gate_state} "
-                    f"(moved to terminal: {current_state})"
-                )
-
-    async def _rebuild_gates_from_linear(self):
-        """Rebuild _pending_gates from Linear state on startup.
-
-        Fetches all tickets currently in gate-flagged Linear states (Awaiting CI,
-        Human Review, Rework) and reconstructs their gate tracking by reading the
-        most recent stokowski tracking comment on each issue.  This ensures the
-        dashboard is accurate immediately after a restart, not only after
-        Stokowski itself dispatches them in the new process lifetime.
-
-        Fallback: if no tracking comment is found, derives the gate state from
-        the ticket's current Linear state by matching against configured gate
-        states' linear_state keys.  This handles tickets that were moved to a
-        gate-flagged state by an agent (via Linear MCP) before Stokowski's own
-        gate-entry comment was posted.
-        """
+        client = self._ensure_linear_client()
+        active_states = self.cfg.active_linear_states()
         gate_states = self.cfg.gate_linear_states()
-        if not gate_states:
-            return
-
-        # Also include Rework — reworked tickets still hold pending gate context
-        all_gate_states = list(gate_states)
         rework_state = self.cfg.linear_states.rework
-        if rework_state and rework_state not in all_gate_states:
-            all_gate_states.append(rework_state)
+        seed_states: list[str] = []
+        for s in (*active_states, *gate_states, rework_state):
+            if s and s not in seed_states:
+                seed_states.append(s)
 
         try:
-            client = self._ensure_linear_client()
-            issues = await client.fetch_issues_by_states(
-                self.cfg.tracker.project_slug, all_gate_states
+            issues = await client.fetch_candidate_issues(
+                self.cfg.tracker.project_slug, seed_states
             )
         except Exception as e:
-            logger.warning(f"Gate rebuild from Linear failed: {e}")
-            return
+            logger.warning(f"Seed fetch failed: {e}")
+            return 0
 
-        rebuilt = 0
+        entry = self.cfg.entry_state
+        if entry is None:
+            return 0
+
+        seeded = 0
         for issue in issues:
-            if issue.id in self._pending_gates:
-                continue  # Already tracked
+            self._last_issues[issue.id] = issue
 
-            # Store minimal issue record so the dashboard can show the identifier
-            if issue.id not in self._last_issues:
-                self._last_issues[issue.id] = issue
-
-            # Try to recover gate state and run counter from tracking comments
-            gate_state: str | None = None
+            # Parse tracking comment to recover internal_state + pending_gate.
+            internal_state: str | None = entry
+            pending_gate: str | None = None
             run = 1
             try:
                 comments = await client.fetch_comments(issue.id)
                 tracking = parse_latest_tracking(comments)
             except Exception as e:
                 logger.warning(
-                    f"Failed to fetch comments for gate rebuild "
-                    f"{issue.identifier}: {e}"
+                    f"Failed to fetch comments for seed {issue.identifier}: {e}"
                 )
                 tracking = None
 
-            if tracking and tracking.get("type") == "gate":
-                tracked_name = tracking.get("state", "")
-                run = tracking.get("run", 1)
-                if tracked_name in self.cfg.states:
-                    gate_state = tracked_name
+            if tracking:
+                ttype = tracking.get("type")
+                run = int(tracking.get("run", 1)) if tracking.get("run") else 1
+                if ttype == "state":
+                    name = tracking.get("state", "")
+                    if name in self.cfg.states:
+                        internal_state = name
+                elif ttype == "gate":
+                    name = tracking.get("state", "")
+                    status = tracking.get("status", "")
+                    if name in self.cfg.states:
+                        if status == "waiting":
+                            internal_state = name
+                            pending_gate = name
+                        elif status == "rework":
+                            rework_to = tracking.get("rework_to", "")
+                            gcfg = self.cfg.states.get(name)
+                            if not rework_to and gcfg:
+                                rework_to = gcfg.rework_to or ""
+                            if rework_to in self.cfg.states:
+                                internal_state = rework_to
+                        elif status == "approved":
+                            gcfg = self.cfg.states.get(name)
+                            target = (gcfg.transitions.get("approve")
+                                      if gcfg else None)
+                            if target and target in self.cfg.states:
+                                internal_state = target
 
-            # Fallback: derive gate state from the current Linear state name by
-            # matching against configured gate states' linear_state keys
-            if not gate_state:
-                current_linear = issue.state.strip().lower()
-                for gname, gcfg in self.cfg.states.items():
-                    if gcfg.type == "gate":
-                        gate_linear = _resolve_linear_state_name(
-                            gcfg.linear_state, self.cfg.linear_states
-                        )
-                        if gate_linear.strip().lower() == current_linear:
-                            gate_state = gname
-                            run = 1
-                            break
+            # Linear-wins for gate detection (§Reconcile rule §5): if the
+            # ticket is currently sitting in a gate Linear state, that
+            # gate is authoritative over whatever the tracking comment
+            # said. Otherwise a rework that ran implement → posted a
+            # state-comment → bounced back to gate before completing would
+            # seed as internal_state=implement with pending_gate=None, and
+            # the dashboard would miss the gate park.
+            current_linear = issue.state.strip().lower()
+            for gname, gcfg in self.cfg.states.items():
+                if gcfg.type == "gate":
+                    gate_linear = _resolve_linear_state_name(
+                        gcfg.linear_state, self.cfg.linear_states
+                    )
+                    if gate_linear.strip().lower() == current_linear:
+                        internal_state = gname
+                        pending_gate = gname
+                        break
 
-            if gate_state:
+            with self.store.transaction() as s:
+                s.upsert_issue(
+                    issue_id=issue.id,
+                    issue_identifier=issue.identifier,
+                    project_name=self.project_name or "",
+                    internal_state=internal_state,
+                    pending_gate=pending_gate,
+                )
+                # Per-gate counter seed.
+                if pending_gate and run > 1:
+                    cur = s.get_run(issue.id, pending_gate)
+                    while cur < run:
+                        cur = s.bump_run(issue.id, pending_gate)
+
+            # Warm in-memory caches.
+            if internal_state:
+                self._issue_current_state[issue.id] = internal_state
+                self._issue_state_runs[issue.id] = run
+            if pending_gate:
+                self._pending_gates[issue.id] = pending_gate
+            seeded += 1
+
+        return seeded
+
+    async def _reconcile_from_storage(self, initial: bool = False):
+        """Reconcile durable state against current Linear truth.
+
+        Inputs (per spec §Reconcile rule):
+          - non-terminal Linear tickets in the project
+          - SQLite rows with pending_gate IS NOT NULL (catches externally-
+            terminalized gate parks)
+
+        Behaviour:
+          - Empty-DB seed: if the issue_state table holds zero rows for this
+            project, run a one-time comment-parsing migration first.
+          - Per ticket: apply the §Reconcile rule decision table.
+          - On `needs-rework` label: dispatch the rework pickup.
+          - On terminal-state divergence: clear pending_gate + internal_state.
+          - Otherwise on divergence: Linear wins, log it.
+        """
+        project = self.project_name or ""
+        existing = self.store.list_active(project)
+
+        if initial and not existing:
+            seeded = await self._seed_from_linear()
+            logger.info(f"reconcile: seeded {seeded} ticket(s) from Linear")
+            return
+
+        if initial:
+            # Warm restart — rehydrate in-memory caches from the durable
+            # store so the dashboard reflects in-flight tickets and the
+            # dispatch loop knows which gates are parked.
+            for row in existing:
+                if row.internal_state:
+                    self._issue_current_state[row.issue_id] = row.internal_state
+                if row.pending_gate:
+                    self._pending_gates[row.issue_id] = row.pending_gate
+                    run = self.store.get_run(row.issue_id, row.pending_gate)
+                    self._issue_state_runs[row.issue_id] = run
+                if row.last_session_id:
+                    self._last_session_ids[row.issue_id] = row.last_session_id
+
+        client = self._ensure_linear_client()
+        active_states = self.cfg.active_linear_states()
+        gate_states = self.cfg.gate_linear_states()
+        non_terminal: list[str] = []
+        for s in (*active_states, *gate_states):
+            if s and s not in non_terminal:
+                non_terminal.append(s)
+
+        try:
+            linear_issues = await client.fetch_candidate_issues(
+                self.cfg.tracker.project_slug, non_terminal
+            )
+        except Exception as e:
+            logger.warning(f"Reconcile fetch failed: {e}")
+            return
+
+        linear_by_id: dict[str, Issue] = {i.id: i for i in linear_issues}
+        for i in linear_issues:
+            self._last_issues[i.id] = i
+
+        # Union of Linear-active and SQLite-parked-at-gate ticket IDs.
+        parked = self.store.iter_pending_gates(project)
+        union_ids: set[str] = set(linear_by_id.keys())
+        for row in parked:
+            union_ids.add(row.issue_id)
+
+        terminal_lower = {s.strip().lower() for s in self.cfg.terminal_linear_states()}
+        active_lower = {s.strip().lower() for s in active_states}
+
+        divergences = 0
+        for issue_id in union_ids:
+            linear_issue = linear_by_id.get(issue_id)
+            row = self.store.get_issue(issue_id)
+
+            # Case 1: Linear says terminal but SQLite has us parked.
+            if linear_issue is None:
+                # Ticket not in non-terminal Linear states → terminal or moved out.
+                if row is not None and (row.pending_gate or row.internal_state):
+                    with self.store.transaction() as s:
+                        s.set_pending_gate(issue_id, None)
+                        s.set_internal_state(issue_id, None)
+                    self._pending_gates.pop(issue_id, None)
+                    self._issue_current_state.pop(issue_id, None)
+                    logger.info(
+                        f"reconcile: cleared externally-terminalized "
+                        f"issue_id={issue_id} (was state={row.internal_state}, "
+                        f"gate={row.pending_gate})"
+                    )
+                    divergences += 1
+                continue
+
+            # Case 2: Linear is in a gate Linear state.
+            linear_state_lower = linear_issue.state.strip().lower()
+            linear_gate_name: str | None = None
+            for gname, gcfg in self.cfg.states.items():
+                if gcfg.type == "gate":
+                    gate_linear = _resolve_linear_state_name(
+                        gcfg.linear_state, self.cfg.linear_states
+                    )
+                    if gate_linear.strip().lower() == linear_state_lower:
+                        linear_gate_name = gname
+                        break
+
+            # Case 3: rework label trigger — dispatch the pickup.
+            if (
+                NEEDS_REWORK_LABEL in linear_issue.labels
+                and issue_id not in self.running
+                and issue_id not in self.claimed
+            ):
+                await self._handle_rework_pickup(linear_issue, row)
+                continue
+
+            # Case 4: New ticket (no row).
+            if row is None:
+                # Resolved on the dispatch path; do nothing here.
+                continue
+
+            # Case 5: Linear says gate, SQLite says different gate or none.
+            if linear_gate_name is not None:
+                if row.pending_gate != linear_gate_name:
+                    with self.store.transaction() as s:
+                        s.set_pending_gate(issue_id, linear_gate_name)
+                        s.set_internal_state(issue_id, linear_gate_name)
+                    self._pending_gates[issue_id] = linear_gate_name
+                    self._issue_current_state[issue_id] = linear_gate_name
+                    logger.info(
+                        f"reconcile: pending_gate divergence "
+                        f"{linear_issue.identifier} "
+                        f"sqlite={row.pending_gate} → linear={linear_gate_name}"
+                    )
+                    divergences += 1
+                continue
+
+            # Case 6: Linear says active (In Progress) but SQLite says parked at gate.
+            if linear_state_lower in active_lower and row.pending_gate:
+                gate_cfg = self.cfg.states.get(row.pending_gate)
+                rework_to = gate_cfg.rework_to if gate_cfg else None
+                target = rework_to if rework_to in self.cfg.states else self.cfg.entry_state
+                with self.store.transaction() as s:
+                    s.set_pending_gate(issue_id, None)
+                    s.set_internal_state(issue_id, target)
+                self._pending_gates.pop(issue_id, None)
+                if target:
+                    self._issue_current_state[issue_id] = target
+                logger.info(
+                    f"reconcile: cleared stale pending_gate "
+                    f"{linear_issue.identifier} (linear is active) "
+                    f"→ internal={target}"
+                )
+                divergences += 1
+
+        if not initial:
+            return
+        logger.info(f"reconcile: {divergences} divergence(s) on startup")
+
+    async def _handle_rework_pickup(self, issue: Issue, row):
+        """Process a `needs-rework` label trigger: bump counter, dispatch.
+
+        Workflow:
+          1. Determine gate context (which gate sent the ticket back).
+          2. Read trigger marker for reason/detector.
+          3. Enforce max_rework — escalate to Human Review if exceeded.
+          4. Bump per-(issue, gate) run counter; persist rework context.
+          5. Move ticket to active Linear state; clear pending_gate.
+          6. Remove `needs-rework` label so the trigger is single-shot.
+          7. Let the dispatch loop pick the ticket up on the next tick.
+        """
+        client = self._ensure_linear_client()
+
+        # 1) Gate context: prefer SQLite, fall back to the Linear state.
+        gate_state: str | None = None
+        if row is not None and row.pending_gate:
+            gate_state = row.pending_gate
+        if gate_state is None:
+            current = issue.state.strip().lower()
+            for gname, gcfg in self.cfg.states.items():
+                if gcfg.type == "gate":
+                    gate_linear = _resolve_linear_state_name(
+                        gcfg.linear_state, self.cfg.linear_states
+                    )
+                    if gate_linear.strip().lower() == current:
+                        gate_state = gname
+                        break
+        if gate_state is None:
+            logger.warning(
+                f"rework pickup: no gate context for {issue.identifier}, "
+                f"removing label and skipping"
+            )
+            await client.remove_label_by_name(issue.id, NEEDS_REWORK_LABEL)
+            return
+
+        gate_cfg = self.cfg.states.get(gate_state)
+        rework_to = gate_cfg.rework_to if gate_cfg else None
+        if not rework_to or rework_to not in self.cfg.states:
+            logger.warning(
+                f"rework pickup: gate {gate_state} has no rework_to target, "
+                f"removing label and skipping"
+            )
+            await client.remove_label_by_name(issue.id, NEEDS_REWORK_LABEL)
+            return
+
+        # 2) Trigger marker.
+        reason = "unknown"
+        detector = "unknown"
+        try:
+            comments = await client.fetch_comments(issue.id)
+            trigger = parse_latest_rework_trigger(comments)
+            if trigger:
+                reason = str(trigger.get("reason", reason))
+                detector = str(trigger.get("detector", detector))
+        except Exception as e:
+            logger.warning(f"rework pickup: failed to read trigger: {e}")
+
+        # 3) Max-rework ceiling.
+        current_run = self.store.get_run(issue.id, gate_state)
+        max_rework = gate_cfg.max_rework if gate_cfg else None
+        if max_rework is not None and current_run >= max_rework:
+            comment = make_gate_comment(
+                state=gate_state, status="escalated", run=current_run,
+            )
+            await client.post_comment(issue.id, comment)
+            escalate_state = self.cfg.linear_states.review
+            moved = await client.update_issue_state(issue.id, escalate_state)
+            if moved:
+                with self.store.transaction() as s:
+                    s.set_pending_gate(issue.id, gate_state)  # parked at Human Review
+                    s.set_internal_state(issue.id, gate_state)
                 self._pending_gates[issue.id] = gate_state
                 self._issue_current_state[issue.id] = gate_state
-                self._issue_state_runs[issue.id] = run
-                rebuilt += 1
-                logger.info(
-                    f"Gate rebuilt issue={issue.identifier} "
-                    f"gate={gate_state} run={run} (recovered from Linear)"
-                )
+            await client.add_label_by_name(issue.id, REWORK_ESCALATED_LABEL)
+            await client.remove_label_by_name(issue.id, NEEDS_REWORK_LABEL)
+            logger.warning(
+                f"rework escalated issue={issue.identifier} gate={gate_state} "
+                f"run={current_run} max={max_rework}"
+            )
+            return
 
-        if rebuilt:
-            logger.info(f"Gate rebuild complete: {rebuilt} gate(s) recovered from Linear")
+        # 4) Bump counter, persist rework context, clear pending_gate.
+        from datetime import datetime as _dt
+        when = _dt.now(timezone.utc)
+        new_run = self.store.bump_run(issue.id, gate_state)
+        with self.store.transaction() as s:
+            s.set_pending_gate(issue.id, None)
+            s.set_internal_state(issue.id, rework_to)
+            s.set_rework_context(issue.id, reason, detector, when)
+
+        # 5) Audit comment + Linear state move.
+        comment = make_gate_comment(
+            state=gate_state, status="rework",
+            rework_to=rework_to, run=new_run,
+        )
+        await client.post_comment(issue.id, comment)
+
+        active_state = self.cfg.linear_states.active
+        moved = await client.update_issue_state(issue.id, active_state)
+        if moved:
+            issue.state = active_state
+        else:
+            logger.warning(
+                f"rework pickup: failed to move {issue.identifier} "
+                f"to '{active_state}'"
+            )
+
+        # 6) Strip the label so the trigger is single-shot.
+        await client.remove_label_by_name(issue.id, NEEDS_REWORK_LABEL)
+
+        # 7) Warm caches for the dispatch loop.
+        self._pending_gates.pop(issue.id, None)
+        self._issue_current_state[issue.id] = rework_to
+        self._issue_state_runs[issue.id] = new_run
+        self._last_issues[issue.id] = issue
+
+        logger.info(
+            f"rework pickup issue={issue.identifier} gate={gate_state} "
+            f"rework_to={rework_to} run={new_run} reason={reason} "
+            f"detector={detector}"
+        )
 
     async def _tick(self):
         """Single poll tick: reconcile, validate, fetch, dispatch."""
         # Reload workflow (supports hot-reload)
         errors = self._load_workflow()
 
-        # Part 1: Reconcile running issues
+        # Part 1: Reconcile running issues against current Linear state
         await self._reconcile()
 
-        # Handle gate responses (approve / rework transitions)
-        await self._handle_gate_responses()
+        # Part 1b: Reconcile durable state against Linear truth.
+        # This subsumes the old _evict_terminal_gates + _rebuild path —
+        # it handles rework label pickups, terminal-state externalisation,
+        # and pending_gate divergences in a single pass.
+        await self._reconcile_from_storage(initial=False)
 
-        # Evict gate entries whose tickets have moved to terminal states
-        await self._evict_terminal_gates()
+        # Handle gate-approved transitions
+        await self._handle_gate_responses()
 
         # Part 2: Validate config
         if errors:
@@ -939,6 +1148,13 @@ class Orchestrator:
                     attempt.session_id = old.session_id
             elif issue.id in self._last_session_ids:
                 attempt.session_id = self._last_session_ids[issue.id]
+            else:
+                # Cold start — pull last session from durable store so the
+                # agent keeps prior reasoning across orchestrator restarts.
+                row = self.store.get_issue(issue.id)
+                if row and row.last_session_id:
+                    attempt.session_id = row.last_session_id
+                    self._last_session_ids[issue.id] = row.last_session_id
 
         self.running[issue.id] = attempt
         task = asyncio.create_task(self._run_worker(issue, attempt))
@@ -1120,6 +1336,15 @@ class Orchestrator:
             last_completed = self._last_completed_at.get(issue.id)
             last_run_at = last_completed.isoformat() if last_completed else None
 
+            # Pull durable rework context — present when this dispatch was
+            # triggered by a `needs-rework` label, otherwise None.
+            rework_reason: str | None = None
+            is_rework = False
+            row = self.store.get_issue(issue.id)
+            if row and row.last_rework_reason:
+                rework_reason = row.last_rework_reason
+                is_rework = True
+
             # Fetch comments for lifecycle context
             comments: list[dict] | None = None
             try:
@@ -1135,10 +1360,11 @@ class Orchestrator:
                 state_name=state_name,
                 state_cfg=state_cfg,
                 run=run,
-                is_rework=False,
+                is_rework=is_rework,
                 attempt=attempt_num or 1,
                 last_run_at=last_run_at,
                 comments=comments,
+                rework_reason=rework_reason,
             )
 
         # Legacy fallback
@@ -1228,11 +1454,19 @@ class Orchestrator:
 
         if attempt.session_id:
             self._last_session_ids[issue.id] = attempt.session_id
+            try:
+                self.store.set_session_id(issue.id, attempt.session_id)
+            except Exception as e:
+                logger.warning(f"Failed to persist session_id for {issue.identifier}: {e}")
 
         completed_at = datetime.now(timezone.utc)
         attempt.completed_at = completed_at
         if attempt.status != "canceled":
             self._last_completed_at[issue.id] = completed_at
+            try:
+                self.store.mark_completed(issue.id, completed_at)
+            except Exception as e:
+                logger.warning(f"Failed to mark completed for {issue.identifier}: {e}")
 
         self.running.pop(issue.id, None)
         self._tasks.pop(issue.id, None)
@@ -1515,9 +1749,10 @@ class MultiOrchestrator:
     keyboard handler context, and cooperative startup/shutdown.
     """
 
-    def __init__(self, workflow_path: str | Path):
+    def __init__(self, workflow_path: str | Path, db_path: Path | None = None):
         self.workflow_path = Path(workflow_path)
         self.pool = ConcurrencyPool()
+        self.store = StateStore(db_path or DEFAULT_DB_PATH)
         self.orchestrators: dict[str, Orchestrator] = {}  # project_name -> Orchestrator
         self._tasks: list[asyncio.Task] = []
         self._stop_event: asyncio.Event | None = None
@@ -1573,6 +1808,7 @@ class MultiOrchestrator:
                 workflow_path=self.workflow_path,
                 project_name=project.name,
                 pool=self.pool,
+                store=self.store,
             )
             self.orchestrators[project.name] = orch
 
@@ -1615,6 +1851,10 @@ class MultiOrchestrator:
         )
         for t in self._tasks:
             t.cancel()
+        try:
+            self.store.close()
+        except Exception:
+            pass
 
     # ── Pause / resume ─────────────────────────────────────────────────────
 

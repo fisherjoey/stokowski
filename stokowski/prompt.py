@@ -85,19 +85,9 @@ def build_template_context(
     run: int = 1,
     attempt: int = 1,
     last_run_at: str | None = None,
+    rework_reason: str | None = None,
 ) -> dict[str, Any]:
-    """Build the Jinja2 template context dict from issue and run metadata.
-
-    Args:
-        issue: The Linear issue being worked on.
-        state_name: Internal state machine state name.
-        run: Current run number for this state.
-        attempt: Retry attempt within this run.
-        last_run_at: ISO timestamp of the last run, if any.
-
-    Returns:
-        A flat dict suitable for Jinja2 rendering.
-    """
+    """Build the Jinja2 template context dict from issue and run metadata."""
     return {
         "issue_id": issue.id,
         "issue_identifier": issue.identifier,
@@ -112,6 +102,7 @@ def build_template_context(
         "run": run,
         "attempt": attempt,
         "last_run_at": last_run_at or "",
+        "rework_reason": rework_reason or "",
     }
 
 
@@ -123,6 +114,7 @@ def build_lifecycle_section(
     run: int = 1,
     is_rework: bool = False,
     recent_comments: list[dict[str, Any]] | None = None,
+    rework_reason: str | None = None,
 ) -> str:
     """Generate the auto-injected lifecycle section.
 
@@ -164,6 +156,9 @@ def build_lifecycle_section(
             "and sent back for changes."
         )
         lines.append("")
+        if rework_reason:
+            lines.append(f"**Trigger:** `{rework_reason}`")
+            lines.append("")
         if recent_comments:
             lines.append("**Review comments:**")
             lines.append("")
@@ -225,6 +220,7 @@ def assemble_prompt(
     attempt: int = 1,
     last_run_at: str | None = None,
     comments: list[dict[str, Any]] | None = None,
+    rework_reason: str | None = None,
 ) -> str:
     """Orchestrate three-layer prompt assembly.
 
@@ -256,6 +252,7 @@ def assemble_prompt(
         run=run,
         attempt=attempt,
         last_run_at=last_run_at,
+        rework_reason=rework_reason,
     )
 
     parts: list[str] = []
@@ -299,6 +296,7 @@ def assemble_prompt(
         run=run,
         is_rework=is_rework,
         recent_comments=recent,
+        rework_reason=rework_reason,
     )
     parts.append(lifecycle)
 
