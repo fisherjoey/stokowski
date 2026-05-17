@@ -36,7 +36,21 @@ stokowski/
   web.py           Optional FastAPI dashboard
   main.py          CLI entry point, keyboard handler
   __main__.py      Enables python -m stokowski
+  pollers/
+    poll_pr_conflicts.py  Flags merge conflicts on symphony PRs → Linear labels/rework
+    poll_ci_status.py     Reflects CI + reviewer verdicts → Linear state transitions
+    _pr_helpers.py        Shared GitHub GraphQL/PR-list helpers
+    _rate_limit_guard.py  Shared rate-limit graceful-exit wrapper
 ```
+
+The pollers are installed as console scripts (`stokowski-poll-pr-conflicts`,
+`stokowski-poll-ci-status`) and are meant to be driven by systemd timers on the
+operator's host. They implement the Stokowski protocol on the GitHub side: watching
+open symphony PRs and keeping Linear state in sync with CI + review outcomes.
+
+All constants that vary per deployment (Linear team ID, project ID, workflow state
+IDs) are configurable via environment variables (see each script's module docstring
+for the full list). Defaults match the synced-sport deployment.
 
 ---
 

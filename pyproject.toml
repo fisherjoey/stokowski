@@ -25,3 +25,5 @@ include = ["stokowski*"]
 
 [project.scripts]
 stokowski = "stokowski.main:cli"
+stokowski-poll-pr-conflicts = "stokowski.pollers.poll_pr_conflicts:cli"
+stokowski-poll-ci-status = "stokowski.pollers.poll_ci_status:cli"
