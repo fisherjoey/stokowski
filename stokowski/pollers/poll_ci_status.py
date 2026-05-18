@@ -679,7 +679,9 @@ def _retrigger_ci(pr):
             "--method", "PATCH",
             f"repos/{REPO}/git/refs/heads/{branch}",
             "-f", f"sha={new_sha}",
-            "-F", "force=false",  # never clobber; pure fast-forward
+            # Omit `force` — the API defaults to false (no force-push), which is
+            # correct for a clean fast-forward. Leaving it out avoids the common
+            # reviewer confusion between `-f` (raw string) and `-F` (typed bool).
         ])
     except subprocess.TimeoutExpired:
         print(f"warning: re-trigger timeout on PR #{pr.get('number')}", file=sys.stderr)
