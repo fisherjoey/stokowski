@@ -79,6 +79,7 @@ class LinearStatesConfig:
     """Maps logical state names to actual Linear state names."""
     todo: str = "Todo"
     active: str = "In Progress"
+    awaiting_ci: str = "Awaiting CI"
     review: str = "Human Review"
     gate_approved: str = "Gate Approved"
     rework: str = "Rework"
@@ -200,6 +201,7 @@ def _resolve_linear_state_name(key: str, ls: LinearStatesConfig) -> str:
     """Resolve a logical state key to the actual Linear state name."""
     mapping: dict[str, str] = {
         "active": ls.active,
+        "awaiting_ci": ls.awaiting_ci,
         "review": ls.review,
         "gate_approved": ls.gate_approved,
         "rework": ls.rework,
@@ -425,7 +427,7 @@ def validate_config(cfg: ServiceConfig) -> list[str]:
         return errors
 
     # Valid linear_state keys
-    valid_linear_keys = {"active", "review", "gate_approved", "rework", "terminal"}
+    valid_linear_keys = {"active", "awaiting_ci", "review", "gate_approved", "rework", "terminal"}
 
     has_agent = False
     has_terminal = False
