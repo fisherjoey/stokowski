@@ -425,9 +425,14 @@ class Orchestrator:
 
             gate_state = self._pending_gates.pop(issue.id, None)
             if not gate_state:
+                # Orphan recovery on restart: _pending_gates is volatile in-memory
+                # state. After a restart it's empty, so we fall back to the latest
+                # gate marker in Linear comments. Accept any gate marker (waiting,
+                # approved, rework) — the state name is what we need; the status
+                # was just what the orchestrator most recently reported about it.
                 comments = await client.fetch_comments(issue.id)
                 tracking = parse_latest_tracking(comments)
-                if tracking and tracking.get("type") == "gate" and tracking.get("status") == "waiting":
+                if tracking and tracking.get("type") == "gate":
                     gate_state = tracking.get("state", "")
 
             if gate_state:
@@ -469,9 +474,13 @@ class Orchestrator:
 
             gate_state = self._pending_gates.pop(issue.id, None)
             if not gate_state:
+                # Orphan recovery on restart: same as the gate_approved branch
+                # above. Accept any gate marker — including 'rework' from a prior
+                # cycle — so tickets re-bounced to Rework after a restart aren't
+                # stranded.
                 comments = await client.fetch_comments(issue.id)
                 tracking = parse_latest_tracking(comments)
-                if tracking and tracking.get("type") == "gate" and tracking.get("status") == "waiting":
+                if tracking and tracking.get("type") == "gate":
                     gate_state = tracking.get("state", "")
 
             if gate_state:
