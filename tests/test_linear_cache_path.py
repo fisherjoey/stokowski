@@ -58,3 +58,22 @@ class TestCacheFirst:
         })
         issues = await client.fetch_candidate_issues("p1", ["Todo"])
         client._graphql.assert_called_once()
+
+
+class TestFetchByStates:
+    @pytest.mark.asyncio
+    async def test_reads_from_cache(self, cache_db):
+        # Add second issue in a different state name
+        conn = sqlite3.connect(cache_db)
+        conn.execute(
+            "INSERT INTO issue VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("u2", "SYN-101", "second", "s-ip", "In Progress", "p1",
+             '[]', None, ISO_NOW, ISO_NOW),
+        )
+        conn.commit()
+        conn.close()
+
+        client = LinearClient("https://api.linear.app/graphql", "k1", cache_db_path=cache_db)
+        client._graphql = AsyncMock(side_effect=AssertionError("should not hit Linear"))
+        issues = await client.fetch_issues_by_states("p1", ["Todo", "In Progress"])
+        assert {i.identifier for i in issues} == {"SYN-100", "SYN-101"}

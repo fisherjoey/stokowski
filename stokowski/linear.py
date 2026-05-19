@@ -316,7 +316,23 @@ class LinearClient:
     async def fetch_issues_by_states(
         self, project_slug: str, states: list[str]
     ) -> list[Issue]:
-        """Fetch issues in specific states (for terminal cleanup)."""
+        """Fetch issues in specific states (for terminal cleanup).
+
+        Consults the warm cache first (if configured and fresh). Falls through
+        to direct Linear API calls when the cache is absent, stale, or returns
+        no results.
+
+        Note: like ``fetch_candidate_issues``, the cache filters by
+        ``project_id`` (UUID stored by the webhook receiver), but the caller
+        passes ``project_slug`` (a human-readable slug). The project filter
+        will currently miss the cache in production, falling through to the
+        Linear path. A future task can plumb the project UUID separately.
+        """
+        if self._cache and self._cache.is_fresh():
+            rows = self._cache.get_issues_by_state_name(project_slug, states)
+            if rows:
+                return [Issue.from_cache_row(r) for r in rows]
+        # ── Linear API path ──────────────────────────────────────────────────
         issues: list[Issue] = []
         cursor = None
 
