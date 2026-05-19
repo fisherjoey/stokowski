@@ -78,6 +78,29 @@ class CacheReader:
             conn.close()
         return [dict(r) for r in rows]
 
+    def get_issues_by_state_name(self, project_id: str, state_names: list[str]) -> list[dict]:
+        """Like get_issues_by_state but filters on the human-readable state_name column.
+
+        Used by LinearClient.fetch_candidate_issues, which receives state names
+        (e.g. "Todo", "In Progress") rather than Linear state UUIDs.
+        """
+        if not state_names:
+            return []
+        conn = self._connect()
+        if conn is None:
+            return []
+        try:
+            placeholders = ",".join("?" * len(state_names))
+            rows = conn.execute(
+                f"SELECT id, identifier, title, state_id, state_name, project_id, "
+                f"labels_json, assignee_id, updated_at "
+                f"FROM issue WHERE project_id=? AND state_name IN ({placeholders})",
+                (project_id, *state_names),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [dict(r) for r in rows]
+
     def get_issue_by_id(self, issue_id: str) -> dict | None:
         conn = self._connect()
         if conn is None:
