@@ -65,6 +65,7 @@ import os
 import re
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -170,9 +171,25 @@ def gql(query, variables=None):
         data=json.dumps({"query": query, "variables": variables or {}}).encode(),
         headers={"Authorization": LINEAR_API_KEY, "Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=30) as r:
-        body = json.loads(r.read())
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            body = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        # Linear wraps rate-limit (and other GraphQL-level errors) in an HTTP 400.
+        # Read the body so the rate-limit guard can detect the actual cause.
+        try:
+            err_body = json.loads(e.read().decode())
+        except Exception:
+            raise RuntimeError(f"Linear API HTTP {e.code}: {e.reason}") from e
+        msg = json.dumps(err_body)
+        if "ratelimited" in msg.lower() or "rate limit" in msg.lower():
+            raise RuntimeError(f"Linear API rate limit exceeded (HTTP {e.code}): {msg[:300]}") from e
+        raise RuntimeError(f"Linear API HTTP {e.code}: {msg[:300]}") from e
     if "errors" in body:
+        # Same treatment for in-body errors (Linear sometimes returns 200 with errors).
+        msg = json.dumps(body["errors"])
+        if "ratelimited" in msg.lower() or "rate limit" in msg.lower():
+            raise RuntimeError(f"Linear API rate limit exceeded: {msg[:300]}")
         raise RuntimeError(f"Linear API error: {body['errors']}")
     return body["data"]
 
@@ -681,8 +698,10 @@ def _retrigger_ci(pr):
         return None
 
     def _api(args):
+        # `gh api` does not accept --repo; the repo is part of the endpoint path
+        # (e.g. repos/OWNER/NAME/...), and every call site here already embeds it.
         return subprocess.run(
-            ["gh", "api", "--repo", REPO, *args],
+            ["gh", "api", *args],
             check=True, capture_output=True, text=True, timeout=30,
         )
 

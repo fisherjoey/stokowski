@@ -40,6 +40,7 @@ import json
 import os
 import re
 import sys
+import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -93,9 +94,22 @@ def gql(query, variables=None):
         data=json.dumps({"query": query, "variables": variables or {}}).encode(),
         headers={"Authorization": LINEAR_API_KEY, "Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=30) as r:
-        body = json.loads(r.read())
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            body = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        try:
+            err_body = json.loads(e.read().decode())
+        except Exception:
+            raise RuntimeError(f"Linear API HTTP {e.code}: {e.reason}") from e
+        msg = json.dumps(err_body)
+        if "ratelimited" in msg.lower() or "rate limit" in msg.lower():
+            raise RuntimeError(f"Linear API rate limit exceeded (HTTP {e.code}): {msg[:300]}") from e
+        raise RuntimeError(f"Linear API HTTP {e.code}: {msg[:300]}") from e
     if "errors" in body:
+        msg = json.dumps(body["errors"])
+        if "ratelimited" in msg.lower() or "rate limit" in msg.lower():
+            raise RuntimeError(f"Linear API rate limit exceeded: {msg[:300]}")
         raise RuntimeError(f"Linear API error: {body['errors']}")
     return body["data"]
 
