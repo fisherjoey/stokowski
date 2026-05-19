@@ -2,8 +2,18 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
+
+
+def _parse_datetime(val: str | None) -> datetime | None:
+    if not val:
+        return None
+    try:
+        return datetime.fromisoformat(val.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
 
 
 @dataclass
@@ -27,6 +37,20 @@ class Issue:
     blocked_by: list[BlockerRef] = field(default_factory=list)
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+    @classmethod
+    def from_cache_row(cls, row: dict) -> Issue:
+        """Construct an Issue from a cache DB row dict (as returned by CacheReader)."""
+        raw_labels = row.get("labels_json") or "[]"
+        labels = json.loads(raw_labels) if isinstance(raw_labels, str) else raw_labels
+        return cls(
+            id=row["id"],
+            identifier=row["identifier"],
+            title=row["title"],
+            state=row.get("state_name") or "",
+            labels=[lbl.lower() for lbl in labels],
+            updated_at=_parse_datetime(row.get("updated_at")),
+        )
 
 
 @dataclass

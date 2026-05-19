@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from pathlib import Path
 
 import httpx
 
+from .cache_reader import CacheReader
 from .models import BlockerRef, Issue
 
 logger = logging.getLogger("stokowski.linear")
@@ -195,7 +197,13 @@ def _normalize_issue(node: dict) -> Issue:
 
 
 class LinearClient:
-    def __init__(self, endpoint: str, api_key: str, timeout_ms: int = 30_000):
+    def __init__(
+        self,
+        endpoint: str,
+        api_key: str,
+        timeout_ms: int = 30_000,
+        cache_db_path: Path | None = None,
+    ):
         self.endpoint = endpoint
         self.api_key = api_key
         self.timeout = timeout_ms / 1000
@@ -206,6 +214,7 @@ class LinearClient:
             },
             timeout=self.timeout,
         )
+        self._cache = CacheReader(cache_db_path) if cache_db_path else None
 
     async def close(self):
         await self._client.aclose()
@@ -250,7 +259,23 @@ class LinearClient:
     async def fetch_candidate_issues(
         self, project_slug: str, active_states: list[str]
     ) -> list[Issue]:
-        """Fetch all issues in active states for the project."""
+        """Fetch all issues in active states for the project.
+
+        Consults the warm cache first (if configured and fresh). Falls through
+        to direct Linear API calls when the cache is absent, stale, or returns
+        no results.
+
+        Note: the cache filters by ``project_id`` (a UUID stored by the
+        webhook receiver). In the current wiring the caller passes
+        ``project_slug`` (a human-readable slug), so the project filter is a
+        cache-miss in production and the code transparently falls through to
+        the Linear path. A future task can plumb the project UUID separately.
+        """
+        if self._cache and self._cache.is_fresh():
+            rows = self._cache.get_issues_by_state_name(project_slug, active_states)
+            if rows:
+                return [Issue.from_cache_row(r) for r in rows]
+        # ── Linear API path ──────────────────────────────────────────────────
         issues: list[Issue] = []
         cursor = None
 
@@ -297,7 +322,23 @@ class LinearClient:
     async def fetch_issues_by_states(
         self, project_slug: str, states: list[str]
     ) -> list[Issue]:
-        """Fetch issues in specific states (for terminal cleanup)."""
+        """Fetch issues in specific states (for terminal cleanup).
+
+        Consults the warm cache first (if configured and fresh). Falls through
+        to direct Linear API calls when the cache is absent, stale, or returns
+        no results.
+
+        Note: like ``fetch_candidate_issues``, the cache filters by
+        ``project_id`` (UUID stored by the webhook receiver), but the caller
+        passes ``project_slug`` (a human-readable slug). The project filter
+        will currently miss the cache in production, falling through to the
+        Linear path. A future task can plumb the project UUID separately.
+        """
+        if self._cache and self._cache.is_fresh():
+            rows = self._cache.get_issues_by_state_name(project_slug, states)
+            if rows:
+                return [Issue.from_cache_row(r) for r in rows]
+        # ── Linear API path ──────────────────────────────────────────────────
         issues: list[Issue] = []
         cursor = None
 
@@ -343,7 +384,21 @@ class LinearClient:
             return False
 
     async def fetch_comments(self, issue_id: str) -> list[dict]:
-        """Fetch all comments on a Linear issue. Returns list of {id, body, createdAt}."""
+        """Fetch all comments on a Linear issue. Returns list of {id, body, createdAt}.
+
+        Consults the warm cache first (if configured and fresh). Falls through
+        to direct Linear API calls when the cache is absent, stale, or returns
+        no results.
+
+        Unlike fetch_candidate_issues / fetch_issues_by_states, the cache
+        lookup here is by issue UUID — no slug/UUID mismatch — so this is the
+        primary steady-state win once the warm cache is populated.
+        """
+        if self._cache and self._cache.is_fresh():
+            rows = self._cache.get_comments_for_issue(issue_id)
+            if rows:
+                return rows
+        # ── original Linear path below, unchanged ──
         try:
             data = await self._graphql(COMMENTS_QUERY, {"issueId": issue_id})
             issue = data.get("issue", {})
